@@ -1,0 +1,84 @@
+import pickle
+import torch
+import tqdm
+from transformer_lens import HookedTransformer
+
+from main import NdxTool
+
+MODEL_ACTIVATIONS = "gpt2-small"
+layer_n = 1
+representation_penalty = 0.1
+neurons_per_feature_penalty = 0.1
+
+# Load data from the pickle file
+with open("sentencedata200.pkl", "rb") as f:
+    sentence_lengths, sentence_fragments, embeddings = pickle.load(f)
+
+# Initialize NdxTool to recover full sentences
+ndx_tool = NdxTool(sentence_lengths, sentence_fragments)
+full_sentences = ndx_tool.get_all_full_sentences()
+
+mlp_dim = 768 * 4
+total_dimensions = mlp_dim * 10
+
+# Define encoder and decoder neural networks
+encoder = torch.nn.Linear(mlp_dim, total_dimensions)
+decoder = torch.nn.Sequential(
+    torch.nn.Linear(total_dimensions, mlp_dim),
+    torch.nn.ReLU(),
+)
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model = HookedTransformer.from_pretrained(MODEL_ACTIVATIONS, device=device)
+
+# Collect activations from the specified layer in the model
+all_activations = []
+for sentence in tqdm.tqdm(full_sentences):
+    tokens = model.to_tokens(sentence)
+    _, cache = model.run_with_cache(tokens, return_type=None, remove_batch_dim=True)
+    activations = cache["post", layer_n, "mlp"]
+    for activation in activations:
+        all_activations.append(activation)
+
+# Define a custom dataset for the collected activations
+class ActivationDataset(torch.utils.data.Dataset):
+    def __init__(self, activations):
+        self.activations = activations
+
+    def __len__(self):
+        return len(self.activations)
+
+    def __getitem__(self, i):
+        return self.activations[i]
+
+# Create a dataloader for the activation dataset
+dataset = ActivationDataset(all_activations)
+dataloader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=True)
+
+# Define the optimizer for training
+optimizer = torch.optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=1e-3)
+
+# Training loop
+for epoch in range(1000):
+    for batch in tqdm.tqdm(dataloader):
+        optimizer.zero_grad()
+        batch = batch.to(device)
+        
+        # Encoder: Sparse representation
+        sparse_representation = encoder(batch)
+        
+        # Decoder: Reconstruction
+        reconstruction = decoder(sparse_representation)
+        
+        # Compute loss with additional penalties
+        loss = torch.nn.functional.mse_loss(reconstruction, batch)
+        loss += representation_penalty * torch.norm(sparse_representation, p=1, dim=1).mean()  # Representation penalty
+        loss += neurons_per_feature_penalty * torch.norm(sparse_representation, p=1, dim=0).mean()  # Neurons per feature penalty
+
+        # Backpropagation and optimization step
+        loss.backward()
+        optimizer.step()
+
+    print(f"Epoch {epoch + 1}, Loss: {loss.item()}")
+
+
