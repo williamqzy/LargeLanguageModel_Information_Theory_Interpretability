@@ -4,23 +4,55 @@ import torch.nn.functional as F
 from autoencoders.learned_dict import LearnedDict
 from autoencoders.ensemble import DictSignature
 
+class SparseAutoencoder(DictSignature):
+    """
+    SparseAutoencoder is an autoencoder using sparse coding.
+    """
 
-class TopKEncoder(DictSignature):
     @staticmethod
     def init(d_activation, n_features, sparsity, dtype=torch.float32):
+        """
+        Initialize the parameters and buffers for the autoencoder.
+
+        Parameters:
+        - d_activation (int): Activation size.
+        - n_features (int): Number of features.
+        - sparsity (int): Sparsity level.
+        - dtype (torch.dtype): Data type for initialization.
+
+        Returns:
+        - params (dict): Dictionary containing the parameters.
+        - buffers (dict): Dictionary containing the buffers.
+        """
         params = {}
+        # Initialize the dictionary randomly
         params["dict"] = torch.randn(n_features, d_activation, dtype=dtype)
 
         buffers = {}
+        # Set sparsity as a buffer
         buffers["sparsity"] = torch.tensor(sparsity, dtype=torch.long)
 
         return params, buffers
 
     @staticmethod
     def encode(b, sparsity, normed_dict):
+        """
+        Encode input using sparse coding.
+
+        Parameters:
+        - b (torch.Tensor): Input batch.
+        - sparsity (int): Sparsity level.
+        - normed_dict (torch.Tensor): Normalized dictionary.
+
+        Returns:
+        - torch.Tensor: Encoded output.
+        """
+        # Compute scores using matrix multiplication
         scores = torch.einsum("ij,bj->bi", normed_dict, b)
+        # Get the indices of the top-k values
         topk = torch.topk(scores, sparsity, dim=-1).indices
 
+        # Create a sparse code tensor
         code = torch.zeros_like(scores)
         code.scatter_(dim=-1, index=topk, src=scores.gather(dim=-1, index=topk))
 
@@ -28,35 +60,100 @@ class TopKEncoder(DictSignature):
 
     @staticmethod
     def loss(params, buffers, batch):
+        """
+        Compute the mean squared error loss for the autoencoder.
+
+        Parameters:
+        - params (dict): Dictionary containing the parameters.
+        - buffers (dict): Dictionary containing the buffers.
+        - batch (torch.Tensor): Input batch.
+
+        Returns:
+        - tuple: Loss value and additional information.
+        """
         normed_dict = params["dict"] / torch.norm(params["dict"], dim=-1)[:, None]
 
         b = batch
         sparsity = buffers["sparsity"]
-        code = TopKEncoder.encode(b, sparsity, normed_dict)
+        code = SparseAutoencoder.encode(b, sparsity, normed_dict)
         b_ = torch.einsum("ij,bi->bj", normed_dict, code)
 
+        # Compute mean squared error loss
         loss = F.mse_loss(b, b_)
 
         return loss, ({"loss": loss}, {"c": code})
 
     @staticmethod
     def to_learned_dict(params, buffers):
+        """
+        Convert the autoencoder parameters and buffers to a learned dictionary.
+
+        Parameters:
+        - params (dict): Dictionary containing the parameters.
+        - buffers (dict): Dictionary containing the buffers.
+
+        Returns:
+        - TopKLearnedDict: Learned dictionary instance.
+        """
         sparsity = buffers["sparsity"].item()
         normed_dict = params["dict"] / torch.norm(params["dict"], dim=-1)[:, None]
-        return TopKLearnedDict(normed_dict, sparsity)
+        return SparseLearnedDict(normed_dict, sparsity)
 
+# Illustration
+# Assume n_features = 4, d_activation = 2
+# The learned dictionary will be a 4x2 matrix
+# Each row represents a feature, and each column represents an activation
+# The sparsity level is set to 1 for illustration purposes
 
-class TopKLearnedDict(LearnedDict):
+# Example usage:
+# params, buffers = SparseAutoencoder.init(d_activation=2, n_features=4, sparsity=1)
+# normed_dict = params["dict"] / torch.norm(params["dict"], dim=-1)[:, None]
+# input_batch = torch.randn(5, 4)  # Assume batch size is 5
+# encoded_output = SparseAutoencoder.encode(input_batch, buffers["sparsity"], normed_dict)
+
+class SparseLearnedDict(LearnedDict):
+    """
+    Learned dictionary class for SparseAutoencoder.
+    """
+
     def __init__(self, dict, sparsity):
+        """
+        Initialize the learned dictionary.
+
+        Parameters:
+        - dict (torch.Tensor): Learned dictionary.
+        - sparsity (int): Sparsity level.
+        """
         self.dict = dict
         self.sparsity = sparsity
         self.n_feats, self.activation_size = self.dict.shape
 
     def to_device(self, device):
+        """
+        Move the learned dictionary to the specified device.
+
+        Parameters:
+        - device (torch.device): Target device.
+        """
         self.dict = self.dict.to(device)
 
     def encode(self, x):
-        return TopKEncoder.encode(x, self.sparsity, self.dict)
+        """
+        Encode input using the learned dictionary.
+
+        Parameters:
+        - x (torch.Tensor): Input batch.
+
+        Returns:
+        - torch.Tensor: Encoded output.
+        """
+        return SparseAutoencoder.encode(x, self.sparsity, self.dict)
 
     def get_learned_dict(self):
+        """
+        Get the learned dictionary.
+
+        Returns:
+        - torch.Tensor: Learned dictionary.
+        """
         return self.dict
